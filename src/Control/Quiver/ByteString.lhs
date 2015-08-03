@@ -18,13 +18,12 @@
 > {-# LANGUAGE RankNTypes #-}
 
 > module Control.Quiver.ByteString (
->   toChunks, fromChunks
+>   toChunks, fromChunks, fromChunks',
 > ) where
 
 > import Data.ByteString (ByteString)
 > import Data.Int
-> import Data.Functor
-> import Control.Quiver
+> import Control.Quiver.SP
 
 > import qualified Data.ByteString as ByteString
 > import qualified Data.ByteString.Lazy as Lazy
@@ -32,12 +31,15 @@
 > -- | A processors that converts a stream of lazy bytestrings
 > --   into a stream of their chunks.
 
-> toChunks :: Functor f => SP Lazy.ByteString ByteString f [ByteString]
-> toChunks = snd <$> (qpure_ Lazy.toChunks >->> qconcat_)
+> toChunks :: Functor f => SP Lazy.ByteString ByteString f ()
+> toChunks = sppure Lazy.toChunks >->> spconcat >&> uncurry mappend
 
 > -- | A processors that converts a stream of strict bytestring chunks
 > --   into a stream of lazy bytestrings with the specified minimum
-> --   and maximum size, without copying any data.
+> --   and maximum size, without copying any data. If the input does
+> --   not provide enough data to complete the final byte string
+> --   of the minimum requested length, the stream processor will
+> --   fail with the incomplete list of chunks.
 
 > fromChunks :: Functor f => Int64 -> Int64 -> SP ByteString Lazy.ByteString f [ByteString]
 > fromChunks m n
@@ -48,53 +50,62 @@
 >   | otherwise = loop0
 >  where
 >   loop0 = loop1 m n []
->   loop1 rm rn cs = consume () (loop2 rm rn cs) (deliver (reverse cs))
+>   loop1 rm rn cs = consume () (loop2 rm rn cs) (loope cs)
 >   loop2 rm rn cs c = loop3 rm rn cs c (fromIntegral (ByteString.length c))
 >   loop3 rm rn cs c cl
 >     | (cl <=  0) = loop1 rm rn cs -- skip empty chunks
 >     | (cl <  rm) = loop1 (rm - cl) (rn - cl) (c:cs)
->     | (cl <= rn) = let xs = reverse (c:cs)
->                    in produce (Lazy.fromChunks xs) (const loop0) (deliver xs)
->     | otherwise  = let (c1, c2) = ByteString.splitAt (fromIntegral rn) c
->                    in produce (Lazy.fromChunks (reverse (c1:cs))) (const $ loop3 m n [] c2 (cl - rn)) (deliver (reverse (c:cs)))
+>     | (cl <= rn) = Lazy.fromChunks (reverse (c:cs)) >:> loop0
+>     | otherwise  = let (c1, c2) = ByteString.splitAt (fromIntegral rn) c in Lazy.fromChunks (reverse (c1:cs)) >:> loop3 m n [] c2 (cl - rn)
 
-> fromMaxChunks :: Functor f => Int64 -> SP ByteString Lazy.ByteString f [ByteString]
+> -- | A processors that converts a stream of strict bytestring chunks
+> --   into a stream of lazy bytestrings with the specified minimum
+> --   and maximum size, without copying any data. This processor
+> --   always emits all of its input, so if the input does not provide
+> --   enough data to complete the final byte string of the minimum
+> --   requested length, the final byte string emitted by the stream
+> --   will be shorter than the requested minimum.
+
+> fromChunks' :: Monad f => Int64 -> Int64 -> SP ByteString Lazy.ByteString f e
+> fromChunks' m n = fromChunks m n >>! (spemit . Lazy.fromChunks)
+
+> fromMaxChunks :: Functor f => Int64 -> SP ByteString Lazy.ByteString f e
 > fromMaxChunks n
 >   | (n <= 0) = error ("fromChunks: invalid maximum chunk size: " ++ show n)
->   | (n >= fromIntegral (maxBound::Int)) = qpure_ Lazy.fromStrict $> []
+>   | (n >= fromIntegral (maxBound::Int)) = sppure Lazy.fromStrict
 >   | otherwise = loop0
 >  where
->   loop0 = consume () loop1 (deliver [])
+>   loop0 = consume () loop1 (deliver SPComplete)
 >   loop1 c = loop2 c (fromIntegral (ByteString.length c))
 >   loop2 c cl
->     | (cl <= n) = produce (Lazy.fromStrict c) (const loop0) (deliver [c])
->     | otherwise = let (c1, c2) = ByteString.splitAt n' c
->                   in produce (Lazy.fromStrict c1) (const $ loop2 c2 (cl - n)) (deliver [c])
+>     | (cl <= n) = Lazy.fromStrict c >:> loop0
+>     | otherwise = let (c1, c2) = ByteString.splitAt n' c in Lazy.fromStrict c1 >:> loop2 c2 (cl - n)
 >   n' = fromIntegral n
 
 > fromMinChunks :: Functor f => Int64 -> SP ByteString Lazy.ByteString f [ByteString]
 > fromMinChunks n
 >   | (n > 0) = loop0 n []
->   | otherwise = qpure_ Lazy.fromStrict $> []
+>   | otherwise = sppure Lazy.fromStrict
 >  where
->   loop0 r cs = consume () (loop1 r cs) (deliver (reverse cs))
+>   loop0 r cs = consume () (loop1 r cs) (loope cs)
 >   loop1 r cs c = loop2 r cs c (fromIntegral (ByteString.length c))
 >   loop2 r cs c cl
 >     | (cl <= 0) = loop0 r cs -- skip empty chunks
 >     | (cl <  r) = loop0 (r - cl) (c:cs)
->     | otherwise = let xs = reverse (c:cs) in produce (Lazy.fromChunks xs) (const $ loop0 n []) (deliver xs)
+>     | otherwise = let xs = reverse (c:cs) in Lazy.fromChunks xs >:> loop0 n []
 
 > fromExactChunks :: Int64 -> SP ByteString Lazy.ByteString f [ByteString]
 > fromExactChunks n
 >   | (n > 0) = loop0 n []
 >   | otherwise = error ("Pipes.fromChunks: invalid chunk size: " ++ show n)
 >  where
->   loop0 r cs = consume () (loop1 r cs) (deliver (reverse cs))
+>   loop0 r cs = consume () (loop1 r cs) (loope cs)
 >   loop1 r cs c = loop2 r cs c (fromIntegral (ByteString.length c))
 >   loop2 r cs c cl
 >     | (cl <= 0) = loop0 r cs -- skip empty chunks
 >     | otherwise = case compare cl r of
 >                     LT -> loop0 (r - cl) (c:cs)
->                     EQ -> let xs = reverse (c:cs) in produce (Lazy.fromChunks xs) (const $ loop0 0 []) (deliver xs)
->                     GT -> let (c1, c2) = ByteString.splitAt (fromIntegral r) c
->                           in produce (Lazy.fromChunks (reverse (c1:cs))) (const $ loop2 n [] c2 (cl - r)) (deliver (reverse (c:cs)))
+>                     EQ -> Lazy.fromChunks (reverse (c:cs)) >:> loop0 0 []
+>                     GT -> let (c1, c2) = ByteString.splitAt (fromIntegral r) c in Lazy.fromChunks (reverse (c1:cs)) >:> loop2 n [] c2 (cl - r)
+
+> loope cs = deliver (if null cs then SPComplete else SPFailed (reverse cs))

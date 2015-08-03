@@ -1,5 +1,5 @@
 name:           quiver-bytestring
-version:        0.0.0.1
+version:        0.0.0.2
 synopsis:       Quiver combinators for bytestring streaming
 homepage:       https://github.com/zadarnowski/quiver-bytestring
 category:       Control
@@ -27,7 +27,7 @@ source-repository head
 source-repository this
   type:         git
   location:     https://github.com/zadarnowski/quiver-bytestring.git
-  tag:          0.0.0.1
+  tag:          0.0.0.2
 
 library
   hs-source-dirs:   src
@@ -40,4 +40,4 @@ library
   build-depends:
     base                    >= 4.8 && < 5,
     bytestring              >= 0.10.6.0,
-    quiver                  >= 0.0.0.6
+    quiver                  >= 0.0.0.10

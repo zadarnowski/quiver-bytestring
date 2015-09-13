@@ -19,11 +19,16 @@
 
 > module Control.Quiver.ByteString (
 >   toChunks, fromChunks, fromChunks',
+>   qGet, qPut,
+>   qReadFile, qWriteFile, qAppendFile,
 > ) where
 
+> import Control.Exception
+> import Control.Monad
+> import Control.Quiver.SP
 > import Data.ByteString (ByteString)
 > import Data.Int
-> import Control.Quiver.SP
+> import System.IO
 
 > import qualified Data.ByteString as ByteString
 > import qualified Data.ByteString.Lazy as Lazy
@@ -109,3 +114,44 @@
 >                     GT -> let (c1, c2) = ByteString.splitAt (fromIntegral r) c in Lazy.fromChunks (reverse (c1:cs)) >:> loop2 n [] c2 (cl - r)
 
 > loope cs = deliver (if null cs then SPComplete else SPFailed (reverse cs))
+
+> -- | Quiver producer that reads the specified file handle in strict chunks,
+> --   each up to @n@ bytes in size.
+
+> qGet :: Handle -> Int -> SProducer ByteString IO IOException
+> qGet h n = loop
+>  where
+>   loop = join $ qlift $ catch (ByteString.hGetSome h n >>= return . produceChunk) (return . spfailed)
+>   produceChunk x
+>     | ByteString.null x = spcomplete
+>     | otherwise = x >:> loop
+
+> -- | Quiver consumer that writes its input to the specified file handle.
+
+> qPut :: Handle -> SConsumer ByteString IO IOException
+> qPut h = loop
+>  where
+>   loop = consume () writeChunk spcomplete
+>   writeChunk x = join $ qlift $ catch (ByteString.hPut h x >> return loop) (return . spfailed)
+
+> -- | Quiver producer that reads the specified file in strict chunks,
+> --   each up to @n@ bytes in size.
+
+> qReadFile :: FilePath -> Int -> SProducer ByteString IO IOException
+> qReadFile f n = join $ qlift $ catch (openBinaryFile f ReadMode >>= return . loop) (return . spfailed)
+>  where
+>   loop h = qhoist (flip onException $ hClose h) (qGet h n) >>= \r -> qlift (hClose h) >> return r
+
+> -- | Quiver consumer that writes its input to the specified file.
+
+> qWriteFile :: FilePath -> SConsumer ByteString IO IOException
+> qWriteFile f = join $ qlift $ catch (openBinaryFile f WriteMode >>= return . loop) (return . spfailed)
+>  where
+>   loop h = qhoist (flip onException $ hClose h) (qPut h) >>= \r -> qlift (hClose h) >> return r
+
+> -- | Quiver consumer that appends its input to the specified file.
+
+> qAppendFile :: FilePath -> SConsumer ByteString IO IOException
+> qAppendFile f = join $ qlift $ catch (openBinaryFile f AppendMode >>= return . loop) (return . spfailed)
+>  where
+>   loop h = qhoist (flip onException $ hClose h) (qPut h) >>= \r -> qlift (hClose h) >> return r
